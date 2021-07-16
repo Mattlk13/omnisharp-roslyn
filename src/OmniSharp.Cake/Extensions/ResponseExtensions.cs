@@ -8,6 +8,7 @@ using OmniSharp.Models;
 using OmniSharp.Models.Navigate;
 using OmniSharp.Models.MembersTree;
 using OmniSharp.Models.Rename;
+using OmniSharp.Models.v1.Completion;
 using OmniSharp.Models.V2;
 using OmniSharp.Models.V2.CodeActions;
 using OmniSharp.Models.V2.CodeStructure;
@@ -27,22 +28,6 @@ namespace OmniSharp.Cake.Extensions
             var quickFixes = response.QuickFixes.Where(x => PathsAreEqual(x.FileName, fileName));
             response.QuickFixes = quickFixes;
             return response;
-
-            bool PathsAreEqual(string x, string y)
-            {
-                if (x == null && y == null)
-                {
-                    return true;
-                }
-                if (x == null || y == null)
-                {
-                    return false;
-                }
-
-                var comparer = PlatformHelper.IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-
-                return Path.GetFullPath(x).Equals(Path.GetFullPath(y), comparer);
-            }
         }
 
         public static Task<QuickFixResponse> TranslateAsync(this QuickFixResponse response, OmniSharpWorkspace workspace)
@@ -211,6 +196,41 @@ namespace OmniSharp.Cake.Extensions
             return response;
         }
 
+        public static async Task<CompletionResponse> TranslateAsync(this CompletionResponse response, OmniSharpWorkspace workspace, CompletionRequest request)
+        {
+            foreach (var item in response.Items)
+            {
+                if (item.TextEdit is null)
+                {
+                    continue;
+                }
+
+                var (_, textEdit) = await item.TextEdit.TranslateAsync(workspace, request.FileName);
+                item.TextEdit = textEdit;
+
+                List<LinePositionSpanTextChange> additionalTextEdits = null;
+
+                foreach (var additionalTextEdit in item.AdditionalTextEdits ?? Enumerable.Empty<LinePositionSpanTextChange>())
+                {
+                    var (_, change) = await additionalTextEdit.TranslateAsync(workspace, request.FileName);
+
+                    // Due to the fact that AdditionalTextEdits return the complete buffer, we can't currently use that in Cake.
+                    // Revisit when we have a solution. At this point it's probably just best to remove AdditionalTextEdits.
+                    if (change.StartLine < 0)
+                    {
+                        continue;
+                    }
+
+                    additionalTextEdits ??= new List<LinePositionSpanTextChange>();
+                    additionalTextEdits.Add(change);
+                }
+
+                item.AdditionalTextEdits = additionalTextEdits;
+            }
+
+            return response;
+        }
+
         private static async Task<CodeElement> TranslateAsync(this CodeElement element, OmniSharpWorkspace workspace, SimpleFileRequest request)
         {
             var builder = new CodeElement.Builder
@@ -240,7 +260,7 @@ namespace OmniSharp.Cake.Extensions
                     continue;
                 }
 
-                builder.AddChild(childElement);
+                builder.AddChild(translatedElement);
             }
 
             return builder.ToCodeElement();
@@ -252,16 +272,19 @@ namespace OmniSharp.Cake.Extensions
 
             if (range.Start.Line == range.End.Line)
             {
-                range.Start.Line = line;
-                range.End.Line = line;
-                return range;
+                return range with
+                {
+                    Start = range.Start with { Line = line },
+                    End = range.End with { Line = line }
+                };
             }
 
-            range.Start.Line = line;
-            (line, _) = await LineIndexHelper.TranslateFromGenerated(request.FileName, range.End.Line, workspace, true);
-            range.End.Line = line;
-
-            return range;
+            var (endLine, _) = await LineIndexHelper.TranslateFromGenerated(request.FileName, range.End.Line, workspace, true);
+            return range with
+            {
+                Start = range.Start with { Line = line },
+                End = range.End with { Line = endLine }
+            };
         }
 
         private static async Task<FileMemberElement> TranslateAsync(this FileMemberElement element, OmniSharpWorkspace workspace, Request request)
@@ -344,6 +367,22 @@ namespace OmniSharp.Cake.Extensions
             change.EndLine = line;
 
             return (newFileName, change);
+        }
+
+        private static bool PathsAreEqual(string x, string y)
+        {
+            if (x == null && y == null)
+            {
+                return true;
+            }
+            if (x == null || y == null)
+            {
+                return false;
+            }
+
+            var comparer = PlatformHelper.IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+            return Path.GetFullPath(x).Equals(Path.GetFullPath(y), comparer);
         }
     }
 }

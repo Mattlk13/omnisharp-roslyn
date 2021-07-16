@@ -16,6 +16,7 @@ using OmniSharp.Plugins;
 using OmniSharp.Services;
 using OmniSharp.Protocol;
 using OmniSharp.Utilities;
+using System.Globalization;
 
 namespace OmniSharp.Stdio
 {
@@ -30,6 +31,7 @@ namespace OmniSharp.Stdio
         private readonly IOmniSharpEnvironment _environment;
         private readonly CancellationTokenSource _cancellationTokenSource;
         private readonly CachedStringBuilder _cachedStringBuilder;
+        private static readonly double TimestampToTicks = TimeSpan.TicksPerSecond / (double)Stopwatch.Frequency;
 
         public Host(
             TextReader input, ISharedTextWriter writer, IOmniSharpEnvironment environment,
@@ -44,7 +46,7 @@ namespace OmniSharp.Stdio
 
             _logger.LogInformation($"Starting OmniSharp on {Platform.Current}");
 
-            _compositionHost = compositionHostBuilder.Build();
+            _compositionHost = compositionHostBuilder.Build(_environment.TargetDirectory);
             _cachedStringBuilder = new CachedStringBuilder();
 
             var handlers = Initialize();
@@ -195,10 +197,11 @@ namespace OmniSharp.Stdio
 
         private async Task HandleRequest(string json, ILogger logger)
         {
+            var startTimestamp = Stopwatch.GetTimestamp();
             var request = RequestPacket.Parse(json);
             if (logger.IsEnabled(LogLevel.Debug))
             {
-                LogRequest(json, logger);
+                LogRequest(json, logger, LogLevel.Debug);
             }
 
             var response = request.Reply();
@@ -232,9 +235,21 @@ namespace OmniSharp.Stdio
             }
             finally
             {
-                if (logger.IsEnabled(LogLevel.Debug))
+                // response gets logged when Debug or more detailed log level is enabled
+                // or when we have unsuccessful response (exception)
+                if (logger.IsEnabled(LogLevel.Debug) || !response.Success)
                 {
-                    LogResponse(response.ToString(), logger);
+                    // if logging is at Debug level, request would have already been logged
+                    // however not for higher log levels, so we want to explicitly log the request too
+                    if (!logger.IsEnabled(LogLevel.Debug))
+                    {
+                        LogRequest(json, logger, LogLevel.Warning);
+                    }
+
+                    var currentTimestamp = Stopwatch.GetTimestamp();
+                    var elapsed = new TimeSpan((long)(TimestampToTicks * (currentTimestamp - startTimestamp)));
+
+                    LogResponse(response.ToString(), logger, response.Success, elapsed);
                 }
 
                 // actually write it
@@ -242,14 +257,14 @@ namespace OmniSharp.Stdio
             }
         }
 
-        void LogRequest(string json, ILogger logger)
+        void LogRequest(string json, ILogger logger, LogLevel logLevel)
         {
             var builder = _cachedStringBuilder.Acquire();
             try
             {
                 builder.AppendLine("************ Request ************");
                 builder.Append(JToken.Parse(json).ToString(Formatting.Indented));
-                logger.LogDebug(builder.ToString());
+                logger.Log(logLevel, builder.ToString());
             }
             finally
             {
@@ -257,14 +272,22 @@ namespace OmniSharp.Stdio
             }
         }
 
-        void LogResponse(string json, ILogger logger)
+        void LogResponse(string json, ILogger logger, bool isSuccess, TimeSpan elapsed)
         {
             var builder = _cachedStringBuilder.Acquire();
             try
             {
-                builder.AppendLine("************  Response ************ ");
+                builder.AppendLine($"************  Response ({elapsed.TotalMilliseconds.ToString("0.0000", CultureInfo.InvariantCulture)}ms) ************ ");
                 builder.Append(JToken.Parse(json).ToString(Formatting.Indented));
-                logger.LogDebug(builder.ToString());
+
+                if (isSuccess)
+                {
+                    logger.LogDebug(builder.ToString());
+                }
+                else
+                {
+                    logger.LogError(builder.ToString());
+                }
             }
             finally
             {

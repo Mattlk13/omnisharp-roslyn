@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Composition;
 using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.CodeAnalysis.ExternalAccess.OmniSharp.Completion;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Completion;
 using Microsoft.CodeAnalysis.Recommendations;
@@ -12,9 +13,12 @@ using OmniSharp.Mef;
 using OmniSharp.Models.AutoComplete;
 using OmniSharp.Options;
 using OmniSharp.Roslyn.CSharp.Services.Documentation;
+using OmniSharp.Roslyn.CSharp.Services.Completion;
+using CompletionService = Microsoft.CodeAnalysis.Completion.CompletionService;
 
 namespace OmniSharp.Roslyn.CSharp.Services.Intellisense
 {
+    [Obsolete("Please use CompletionService.")]
     [OmniSharpHandler(OmniSharpEndpoints.AutoComplete, LanguageNames.CSharp)]
     public class IntellisenseService : IRequestHandler<AutoCompleteRequest, IEnumerable<AutoCompleteResponse>>
     {
@@ -37,21 +41,21 @@ namespace OmniSharp.Roslyn.CSharp.Services.Intellisense
             foreach (var document in documents)
             {
                 var sourceText = await document.GetTextAsync();
-                var position = sourceText.Lines.GetPosition(new LinePosition(request.Line, request.Column));
+                var position = sourceText.GetTextPosition(request);
                 var service = CompletionService.GetService(document);
                 var completionList = await service.GetCompletionsAsync(document, position);
 
                 if (completionList != null)
                 {
                     // Only trigger on space if Roslyn has object creation items
-                    if (request.TriggerCharacter == " " && !completionList.Items.Any(i => i.IsObjectCreationCompletionItem()))
+                    if (request.TriggerCharacter == " " && !completionList.Items.Any(i => i.GetProviderName() is CompletionListBuilder.ObjectCreationCompletionProvider))
                     {
                         return completions;
                     }
 
                     // get recommended symbols to match them up later with SymbolCompletionProvider
                     var semanticModel = await document.GetSemanticModelAsync();
-                    var recommendedSymbols = await Recommender.GetRecommendedSymbolsAtPositionAsync(semanticModel, position, _workspace);
+                    var recommendedSymbols = (await Recommender.GetRecommendedSymbolsAtPositionAsync(semanticModel, position, _workspace)).ToArray();
 
                     var isSuggestionMode = completionList.SuggestionModeItem != null;
                     foreach (var item in completionList.Items)
@@ -99,19 +103,8 @@ namespace OmniSharp.Roslyn.CSharp.Services.Intellisense
                                 continue;
                             }
 
-                            // for other completions, i.e. keywords, create a simple AutoCompleteResponse
-                            // we'll just assume that the completion text is the same
-                            // as the display text.
-                            var response = new AutoCompleteResponse()
-                            {
-                                CompletionText = item.DisplayText,
-                                DisplayText = item.DisplayText,
-                                Snippet = item.DisplayText,
-                                Kind = request.WantKind ? item.Tags.First() : null,
-                                IsSuggestionMode = isSuggestionMode,
-                                Preselect = preselect
-                            };
-
+                            // for other completions, i.e. keywords or em, create a simple AutoCompleteResponse
+                            var response = item.ToAutoCompleteResponse(request.WantKind, isSuggestionMode, preselect);
                             completions.Add(response);
                         }
                     }

@@ -67,6 +67,27 @@ namespace OmniSharp.Utilities
             });
         }
 
+        public static Lazy<MethodInfo> LazyGetProperty(this Lazy<Type> lazyType, string propertyName, bool getMethod)
+        {
+            if (lazyType == null)
+            {
+                throw new ArgumentNullException(nameof(lazyType));
+            }
+
+            return new(() =>
+            {
+                var type = lazyType.Value;
+                var propertyInfo = type.GetProperty(propertyName);
+
+                if (propertyInfo == null)
+                {
+                    throw new InvalidOperationException($"Could not get method '{propertyName}' on type '{type.FullName}'");
+                }
+
+                return getMethod ? propertyInfo.GetMethod : propertyInfo.SetMethod;
+            });
+        }
+
         public static MethodInfo GetMethod(this Lazy<Type> lazyType, string methodName)
         {
             if (lazyType == null)
@@ -110,7 +131,12 @@ namespace OmniSharp.Utilities
                 throw new ArgumentNullException(nameof(lazyType));
             }
 
-            return Activator.CreateInstance(lazyType.Value, args);
+            return Activator.CreateInstance(
+                lazyType.Value,
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance,
+                binder: null,
+                args,
+                culture: null);
         }
 
         public static T CreateInstance<T>(this Type type) where T : class
@@ -157,6 +183,22 @@ namespace OmniSharp.Utilities
             }
 
             return (T)methodInfo.Invoke(null, args);
+        }
+
+        public static T InvokeStatic<T>(this Lazy<Type> lazyType, string methodName, object[] args)
+        {
+            if (lazyType == null)
+            {
+                throw new ArgumentNullException(nameof(lazyType));
+            }
+
+            var method = lazyType.Value.GetMethod(methodName);
+            if (method == null)
+            {
+                throw new InvalidOperationException($"Failed to retrieve method {method}");
+            }
+
+            return method.InvokeStatic<T>(args);
         }
 
         public static T InvokeStatic<T>(this Lazy<MethodInfo> lazyMethodInfo, object[] args)
